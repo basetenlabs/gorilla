@@ -1197,6 +1197,18 @@ api_inference_model_map = {
         is_fc_model=False,
         underscore_to_dot=False,
     ),
+    "kimi-k26-disagg": ModelConfig(
+        model_name="kimi-k26-disagg",
+        display_name="Moonshotai-Kimi-K2-Instruct (FC)",
+        url="https://huggingface.co/moonshotai/Kimi-K2.6",
+        org="MoonshotAI",
+        license="modified-mit",
+        model_handler=OpenAICompletionsHandler,
+        input_price=None,
+        output_price=None,
+        is_fc_model=True,
+        underscore_to_dot=True,
+    ),
     "Nanbeige3.5-Pro-Thinking-FC": ModelConfig(
         model_name="Nanbeige3.5-Pro-Thinking",
         display_name="Nanbeige3.5-Pro-Thinking (FC)",
