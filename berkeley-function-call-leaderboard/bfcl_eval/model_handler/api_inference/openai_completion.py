@@ -29,6 +29,21 @@ from bfcl_eval.model_handler.utils import (
 from openai import OpenAI, RateLimitError
 
 
+class _NoRetry5xxOpenAI(OpenAI):
+    """OpenAI client that does NOT retry on 5xx responses.
+
+    The default SDK behavior is to retry 408, 409, 429, and any 5xx up to
+    `max_retries` times. We want to keep the 408/409/429 retries (transient
+    network/rate-limit conditions) but fail fast on 5xx, which on this
+    deployment usually means the engine is in a state retries won't fix.
+    """
+
+    def _should_retry(self, response: httpx.Response) -> bool:
+        if response.status_code >= 500:
+            return False
+        return super()._should_retry(response)
+
+
 class OpenAICompletionsHandler(BaseHandler):
     def __init__(
         self,
@@ -40,7 +55,7 @@ class OpenAICompletionsHandler(BaseHandler):
     ) -> None:
         super().__init__(model_name, temperature, registry_name, is_fc_model, **kwargs)
         self.model_style = ModelStyle.OPENAI_COMPLETIONS
-        self.client = OpenAI(**self._build_client_kwargs())
+        self.client = _NoRetry5xxOpenAI(**self._build_client_kwargs())
 
     @staticmethod
     def _log_http_error_response(response: httpx.Response) -> None:
