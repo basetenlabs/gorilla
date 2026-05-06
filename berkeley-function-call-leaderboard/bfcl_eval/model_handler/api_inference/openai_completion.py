@@ -1,8 +1,18 @@
 import json
+import logging
 import httpx
 import os
 import time
 from typing import Any
+
+# Surface the OpenAI SDK's internal retry attempts (max_retries on the client).
+# The SDK logs "Retrying request to ... in N seconds" at INFO on this logger.
+_openai_logger = logging.getLogger("openai")
+if not _openai_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[openai] %(message)s"))
+    _openai_logger.addHandler(_handler)
+_openai_logger.setLevel(logging.INFO)
 
 from bfcl_eval.constants.type_mappings import GORILLA_TO_OPENAPI
 from bfcl_eval.model_handler.base_handler import BaseHandler
@@ -16,7 +26,7 @@ from bfcl_eval.model_handler.utils import (
     retry_with_backoff,
     system_prompt_pre_processing_chat_model,
 )
-from openai import OpenAI, RateLimitError
+from openai import OpenAI, RateLimitError, APIStatusError
 
 
 class OpenAICompletionsHandler(BaseHandler):
@@ -76,10 +86,55 @@ class OpenAICompletionsHandler(BaseHandler):
     @retry_with_backoff(error_type=RateLimitError)
     def generate_with_backoff(self, **kwargs):
         start_time = time.time()
-        api_response = self.client.chat.completions.create(**kwargs)
+        try:
+            api_response = self.client.chat.completions.create(**kwargs)
+        except APIStatusError as e:
+            # Surfaces the server's error body, which httpx's "HTTP/1.1 500 ..."
+            # line does not include. Covers 4xx and 5xx from any OpenAI-compatible
+            # endpoint (e.g. kimi-k26-disagg).
+            status = getattr(e, "status_code", "?")
+            url = getattr(getattr(e, "response", None), "url", "?")
+            try:
+                body_text = e.response.text
+            except Exception:
+                body_text = str(getattr(e, "body", e))
+            print(
+                f"[openai] HTTP {status} from {url}\n"
+                f"[openai] error body: {body_text}"
+            )
+            raise
         end_time = time.time()
 
-        return api_response, end_time - start_time
+        latency = end_time - start_time
+        if latency > 20:
+            usage = getattr(api_response, "usage", None)
+            completion_tokens = getattr(usage, "completion_tokens", None)
+            prompt_tokens = getattr(usage, "prompt_tokens", None)
+
+            # Detokenized response text. Chat completions return already-decoded
+            # text on .message.content; tool_calls hold the function name and
+            # JSON arguments string when the model invoked a tool. Include both.
+            try:
+                message = api_response.choices[0].message
+                content = getattr(message, "content", None) or ""
+                tool_calls = getattr(message, "tool_calls", None) or []
+                tool_text = " | ".join(
+                    f"{tc.function.name}({tc.function.arguments})" for tc in tool_calls
+                )
+                response_text = content + (
+                    f"  tool_calls: {tool_text}" if tool_text else ""
+                )
+            except Exception as e:
+                response_text = f"<failed to extract response text: {e}>"
+
+            print(
+                f"[openai] slow response: {latency:.1f}s, "
+                f"completion_tokens={completion_tokens}, prompt_tokens={prompt_tokens}, "
+                f"model={kwargs.get('model')}\n"
+                f"[openai] response text:\n{response_text}"
+            )
+
+        return api_response, latency
 
     #### FC methods ####
 
