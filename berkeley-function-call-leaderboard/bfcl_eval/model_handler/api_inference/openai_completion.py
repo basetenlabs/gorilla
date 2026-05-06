@@ -1,4 +1,5 @@
 import json
+import httpx
 import os
 import time
 from typing import Any
@@ -37,6 +38,14 @@ class OpenAICompletionsHandler(BaseHandler):
         and rely on the OpenAI SDK's own defaults when possible."""
 
         kwargs = {}
+
+        kwargs = {
+            "timeout": httpx.Timeout(
+                timeout=float(os.getenv("OPENAI_TIMEOUT", "120")),
+                connect=5.0,
+            ),
+            "max_retries": int(os.getenv("OPENAI_MAX_RETRIES", "1")),
+        }
 
         if api_key := os.getenv("OPENAI_API_KEY"):
             kwargs["api_key"] = api_key
