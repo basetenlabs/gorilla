@@ -26,7 +26,7 @@ from bfcl_eval.model_handler.utils import (
     retry_with_backoff,
     system_prompt_pre_processing_chat_model,
 )
-from openai import OpenAI, RateLimitError, APIStatusError
+from openai import OpenAI, RateLimitError
 
 
 class OpenAICompletionsHandler(BaseHandler):
@@ -42,17 +42,47 @@ class OpenAICompletionsHandler(BaseHandler):
         self.model_style = ModelStyle.OPENAI_COMPLETIONS
         self.client = OpenAI(**self._build_client_kwargs())
 
+    @staticmethod
+    def _log_http_error_response(response: httpx.Response) -> None:
+        """httpx response event hook. Fires for EVERY response, including the
+        intermediate ones the OpenAI SDK retries on (5xx, 429). The SDK's own
+        try/except only sees the final exception, so without this hook the body
+        of swallowed errors is invisible."""
+        if response.status_code < 400:
+            return
+        # Body isn't read yet at hook time on a streaming-capable client;
+        # force-read so .text is available.
+        try:
+            response.read()
+            body_text = response.text
+        except Exception as ex:
+            body_text = f"<could not read body: {ex}>"
+        print(
+            f"[openai] HTTP {response.status_code} from {response.request.url}\n"
+            f"[openai] error body: {body_text}"
+        )
+
     def _build_client_kwargs(self):
         """Collect OpenAI client keyword arguments from environment variables, but only
         include them if they are actually present so that we keep the call minimal
         and rely on the OpenAI SDK's own defaults when possible."""
 
+        timeout = httpx.Timeout(
+            timeout=float(os.getenv("OPENAI_TIMEOUT", "120")),
+            connect=5.0,
+        )
+
+        # Custom http_client so we can attach a response event hook that logs
+        # the body of any 4xx/5xx response, including ones the SDK retries away.
+        http_client = httpx.Client(
+            timeout=timeout,
+            event_hooks={"response": [self._log_http_error_response]},
+        )
+
         kwargs = {
-            "timeout": httpx.Timeout(
-                timeout=float(os.getenv("OPENAI_TIMEOUT", "120")),
-                connect=5.0,
-            ),
+            "timeout": timeout,
             "max_retries": int(os.getenv("OPENAI_MAX_RETRIES", "1")),
+            "http_client": http_client,
         }
 
         if api_key := os.getenv("OPENAI_API_KEY"):
@@ -85,24 +115,10 @@ class OpenAICompletionsHandler(BaseHandler):
 
     @retry_with_backoff(error_type=RateLimitError)
     def generate_with_backoff(self, **kwargs):
+        # 4xx/5xx error bodies are logged by the response event hook attached
+        # to the underlying httpx.Client (see _log_http_error_response).
         start_time = time.time()
-        try:
-            api_response = self.client.chat.completions.create(**kwargs)
-        except APIStatusError as e:
-            # Surfaces the server's error body, which httpx's "HTTP/1.1 500 ..."
-            # line does not include. Covers 4xx and 5xx from any OpenAI-compatible
-            # endpoint (e.g. kimi-k26-disagg).
-            status = getattr(e, "status_code", "?")
-            url = getattr(getattr(e, "response", None), "url", "?")
-            try:
-                body_text = e.response.text
-            except Exception:
-                body_text = str(getattr(e, "body", e))
-            print(
-                f"[openai] HTTP {status} from {url}\n"
-                f"[openai] error body: {body_text}"
-            )
-            raise
+        api_response = self.client.chat.completions.create(**kwargs)
         end_time = time.time()
 
         latency = end_time - start_time
