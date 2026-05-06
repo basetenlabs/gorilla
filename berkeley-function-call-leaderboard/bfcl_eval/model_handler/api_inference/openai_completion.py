@@ -37,8 +37,6 @@ class OpenAICompletionsHandler(BaseHandler):
         include them if they are actually present so that we keep the call minimal
         and rely on the OpenAI SDK's own defaults when possible."""
 
-        kwargs = {}
-
         kwargs = {
             "timeout": httpx.Timeout(
                 timeout=float(os.getenv("OPENAI_TIMEOUT", "120")),
